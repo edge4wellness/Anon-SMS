@@ -9,14 +9,7 @@ import {
   StyleSheet,
   Alert,
 } from 'react-native';
-import {
-  upsertProject,
-  upsertMaterial,
-  upsertLabor,
-  getSectionsForProject,
-  getMaterialsForProject,
-  getLaborForProject,
-} from '../database/localCache';
+import { localCache } from '../database/localCache';
 import { pushPendingChanges } from '../database/syncEngine';
 import { calculateProjectTotal } from '../utils/calcEngine';
 import SaveProgressModal from '../components/SaveProgressModal';
@@ -60,19 +53,13 @@ export default function EstimatorDashboard({ project, authToken, onBack }) {
   const [showSaveModal, setShowSaveModal] = useState(false);
   const [syncing, setSyncing] = useState(false);
 
+  // Load from local cache on mount
   useEffect(() => {
-    async function load() {
-      const [sections, materials, labor] = await Promise.all([
-        getSectionsForProject(project.project_id),
-        getMaterialsForProject(project.project_id),
-        getLaborForProject(project.project_id),
-      ]);
-      dispatch({ type: 'LOAD', payload: { sections, materials, labor } });
-    }
-    load();
+    const { sections, materials, labor } = localCache.getSaveState();
+    dispatch({ type: 'LOAD', payload: { sections, materials, labor } });
   }, [project.project_id]);
 
-  // Live recalculation on every state change
+  // Live recalculation via calculateProjectTotal on every state change
   const calc = useMemo(() => {
     if (!state.sections.length) return null;
     return calculateProjectTotal(
@@ -84,7 +71,6 @@ export default function EstimatorDashboard({ project, authToken, onBack }) {
     );
   }, [project, state]);
 
-  // Map section_id → lump_sum_price for the proposal view
   const lumpSumBySectionId = useMemo(() => {
     if (!calc) return {};
     return Object.fromEntries(
@@ -106,21 +92,19 @@ export default function EstimatorDashboard({ project, authToken, onBack }) {
     setDirty(true);
   }
 
-  async function persistAll() {
+  function persistLocally() {
     if (!calc) return;
     const updatedProject = { ...project, ...calc.database_update };
-    await upsertProject(updatedProject);
-    await Promise.all(state.materials.map(upsertMaterial));
-    await Promise.all(state.labor.map(upsertLabor));
+    localCache.saveProjectOffline(updatedProject, state.sections, state.materials, state.labor);
     setDirty(false);
   }
 
   async function saveAndSync() {
-    await persistAll();
+    persistLocally();
     setSyncing(true);
     try {
       const { pushed } = await pushPendingChanges(authToken);
-      Alert.alert('Synced', `${pushed} project(s) saved to cloud.`);
+      Alert.alert('Synced', pushed ? 'Project saved to cloud.' : 'Already up to date.');
     } catch (e) {
       Alert.alert('Sync Failed', e.message);
     } finally {
@@ -161,7 +145,7 @@ export default function EstimatorDashboard({ project, authToken, onBack }) {
         </TouchableOpacity>
       </View>
 
-      {/* Bid banner — shows database_update totals */}
+      {/* Bid banner */}
       <View style={styles.banner}>
         <View style={styles.bannerRow}>
           <View style={styles.bannerCell}>
@@ -194,7 +178,6 @@ export default function EstimatorDashboard({ project, authToken, onBack }) {
 
           return (
             <View key={section.section_id} style={styles.sectionCard}>
-              {/* Section header — lump_sum_price from client_proposal_view */}
               <View style={styles.sectionHeader}>
                 <Text style={styles.sectionTitle}>{section.area_name}</Text>
                 <View style={styles.lumpBadge}>
@@ -203,7 +186,6 @@ export default function EstimatorDashboard({ project, authToken, onBack }) {
                 </View>
               </View>
 
-              {/* Materials input rows */}
               {mats.length > 0 && (
                 <>
                   <Text style={styles.groupLabel}>MATERIALS</Text>
@@ -238,7 +220,6 @@ export default function EstimatorDashboard({ project, authToken, onBack }) {
                 </>
               )}
 
-              {/* Labor input rows */}
               {labs.length > 0 && (
                 <>
                   <Text style={[styles.groupLabel, { marginTop: 10 }]}>LABOR</Text>
@@ -289,7 +270,7 @@ export default function EstimatorDashboard({ project, authToken, onBack }) {
       <SaveProgressModal
         visible={showSaveModal}
         onSave={async () => { await saveAndSync(); onBack(); }}
-        onSaveLocal={async () => { await persistAll(); setShowSaveModal(false); onBack(); }}
+        onSaveLocal={() => { persistLocally(); setShowSaveModal(false); onBack(); }}
         onDiscard={() => { setShowSaveModal(false); onBack(); }}
       />
     </SafeAreaView>
@@ -299,95 +280,42 @@ export default function EstimatorDashboard({ project, authToken, onBack }) {
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: '#FAFAFA' },
   header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderBottomWidth: 1,
-    borderBottomColor: '#EEE',
-    backgroundColor: '#FFF',
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    paddingHorizontal: 16, paddingVertical: 12,
+    borderBottomWidth: 1, borderBottomColor: '#EEE', backgroundColor: '#FFF',
   },
   navBtn: { fontSize: 15, color: '#1A73E8', fontWeight: '500', minWidth: 60 },
   navBtnRight: { textAlign: 'right' },
   navBtnDisabled: { color: '#AAA' },
-  title: {
-    flex: 1,
-    fontSize: 16,
-    fontWeight: '700',
-    color: '#1A1A1A',
-    textAlign: 'center',
-    paddingHorizontal: 8,
-  },
+  title: { flex: 1, fontSize: 16, fontWeight: '700', color: '#1A1A1A', textAlign: 'center', paddingHorizontal: 8 },
   banner: { backgroundColor: '#1A73E8', paddingVertical: 14, paddingHorizontal: 16 },
-  bannerRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
+  bannerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   bannerCell: { flex: 1, alignItems: 'center' },
   bannerLabel: { fontSize: 11, color: 'rgba(255,255,255,0.75)', marginBottom: 2 },
   bannerValue: { fontSize: 15, fontWeight: '700', color: '#FFF' },
   bannerBid: { fontSize: 20 },
   bannerDivider: { color: 'rgba(255,255,255,0.3)', fontSize: 20 },
-  bannerMarkup: {
-    fontSize: 11,
-    color: 'rgba(255,255,255,0.6)',
-    textAlign: 'center',
-    marginTop: 6,
-  },
+  bannerMarkup: { fontSize: 11, color: 'rgba(255,255,255,0.6)', textAlign: 'center', marginTop: 6 },
   scroll: { padding: 12 },
   sectionCard: {
-    backgroundColor: '#FFF',
-    borderRadius: 10,
-    padding: 14,
-    marginBottom: 10,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.06,
-    shadowRadius: 3,
-    elevation: 2,
+    backgroundColor: '#FFF', borderRadius: 10, padding: 14, marginBottom: 10,
+    shadowColor: '#000', shadowOffset: { width: 0, height: 1 }, shadowOpacity: 0.06, shadowRadius: 3, elevation: 2,
   },
-  sectionHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 10,
-  },
+  sectionHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 },
   sectionTitle: { fontSize: 15, fontWeight: '700', color: '#1A1A1A', flex: 1 },
   lumpBadge: { alignItems: 'flex-end' },
   lumpLabel: { fontSize: 10, color: '#AAA', fontWeight: '600' },
   lumpValue: { fontSize: 16, fontWeight: '800', color: '#1A73E8' },
-  groupLabel: {
-    fontSize: 10,
-    fontWeight: '700',
-    color: '#AAA',
-    letterSpacing: 0.8,
-    marginBottom: 6,
-  },
+  groupLabel: { fontSize: 10, fontWeight: '700', color: '#AAA', letterSpacing: 0.8, marginBottom: 6 },
   lineRow: { marginBottom: 8 },
   lineDesc: { fontSize: 13, color: '#333', marginBottom: 4 },
   lineFields: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   microField: { alignItems: 'center' },
   microLabel: { fontSize: 10, color: '#999', marginBottom: 2 },
   microInput: {
-    borderWidth: 1,
-    borderColor: '#DDD',
-    borderRadius: 6,
-    paddingHorizontal: 6,
-    paddingVertical: 5,
-    fontSize: 13,
-    color: '#1A1A1A',
-    width: 60,
-    textAlign: 'center',
-    backgroundColor: '#FAFAFA',
+    borderWidth: 1, borderColor: '#DDD', borderRadius: 6,
+    paddingHorizontal: 6, paddingVertical: 5, fontSize: 13,
+    color: '#1A1A1A', width: 60, textAlign: 'center', backgroundColor: '#FAFAFA',
   },
-  lineTotal: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: '#555',
-    marginLeft: 'auto',
-    minWidth: 70,
-    textAlign: 'right',
-  },
+  lineTotal: { fontSize: 13, fontWeight: '700', color: '#555', marginLeft: 'auto', minWidth: 70, textAlign: 'right' },
 });
