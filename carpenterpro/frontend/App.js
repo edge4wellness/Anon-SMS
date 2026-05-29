@@ -1,5 +1,4 @@
 import React, { useState } from 'react';
-import { View, ActivityIndicator, StyleSheet } from 'react-native';
 import { localCache } from './src/database/localCache';
 import OnboardingScreen from './src/screens/OnboardingScreen';
 import TemplateSelector from './src/screens/TemplateSelector';
@@ -16,10 +15,9 @@ export default function App() {
   const [authToken, setAuthToken] = useState(null);
   const [activeProject, setActiveProject] = useState(null);
 
-  function handleOnboardingComplete({ zipCode, businessName }) {
-    // Guest session starts immediately — no async DB init needed
+  function handleOnboardingNext({ bizName, zip }) {
     const userId = `USR-${Date.now()}`;
-    localCache.convertToPermanentUser(userId, `${userId}@local`, businessName, zipCode);
+    localCache.convertToPermanentUser(userId, `${userId}@local`, bizName, zip);
     setAuthToken(userId);
     setScreen(SCREEN.TEMPLATE_SELECT);
   }
@@ -31,7 +29,7 @@ export default function App() {
       user_id: localCache.getSaveState().user.user_id,
       customer_name: null,
       customer_address: null,
-      project_type: template.name,
+      project_type: template.title,
       status: 'draft',
       total_materials_cost: 0,
       total_labor_cost: 0,
@@ -40,7 +38,6 @@ export default function App() {
       created_at: now,
       last_modified_at: now,
     };
-    // Seed the cache with the template's sections, materials, and labor
     localCache.saveProjectOffline(
       project,
       template.sections ?? [],
@@ -52,14 +49,13 @@ export default function App() {
   }
 
   if (screen === SCREEN.ONBOARDING) {
-    return <OnboardingScreen onComplete={handleOnboardingComplete} />;
+    return <OnboardingScreen onNext={handleOnboardingNext} />;
   }
 
   if (screen === SCREEN.TEMPLATE_SELECT) {
     return (
       <TemplateSelector
         onSelect={handleTemplateSelected}
-        onBack={() => setScreen(SCREEN.ONBOARDING)}
       />
     );
   }
@@ -76,7 +72,3 @@ export default function App() {
 
   return null;
 }
-
-const styles = StyleSheet.create({
-  loader: { flex: 1, justifyContent: 'center', alignItems: 'center', backgroundColor: '#FAFAFA' },
-});

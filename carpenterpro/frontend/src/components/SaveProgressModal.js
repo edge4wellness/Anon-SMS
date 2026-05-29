@@ -1,129 +1,23 @@
 import React, { useState } from 'react';
-import {
-  Modal,
-  View,
-  Text,
-  TouchableOpacity,
-  ActivityIndicator,
-  StyleSheet,
-} from 'react-native';
 
-/**
- * "Save Progress" gate — shown before the user can navigate away from an
- * in-progress estimate.  Offers Save (cloud sync), Save Locally, and Discard.
- */
-export default function SaveProgressModal({ visible, onSave, onSaveLocal, onDiscard }) {
-  const [saving, setSaving] = useState(false);
+export default function SaveProgressModal({ isOpen, onSave, onClose }) {
+    const [email, setEmail] = useState('');
+    const [password, setPassword] = useState('');
 
-  async function handleSave() {
-    setSaving(true);
-    try {
-      await onSave();
-    } finally {
-      setSaving(false);
-    }
-  }
+    if (!isOpen) return null;
 
-  return (
-    <Modal
-      visible={visible}
-      transparent
-      animationType="fade"
-      statusBarTranslucent
-    >
-      <View style={styles.overlay}>
-        <View style={styles.sheet}>
-          <Text style={styles.title}>Save your progress?</Text>
-          <Text style={styles.body}>
-            You have unsaved changes. Choose how you'd like to save before leaving.
-          </Text>
-
-          <TouchableOpacity
-            style={[styles.btn, styles.btnPrimary]}
-            onPress={handleSave}
-            disabled={saving}
-          >
-            {saving
-              ? <ActivityIndicator color="#FFF" />
-              : <Text style={styles.btnPrimaryText}>Save &amp; Sync</Text>
-            }
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[styles.btn, styles.btnSecondary]}
-            onPress={onSaveLocal}
-            disabled={saving}
-          >
-            <Text style={styles.btnSecondaryText}>Save Locally</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={styles.discardBtn}
-            onPress={onDiscard}
-            disabled={saving}
-          >
-            <Text style={styles.discardText}>Discard Changes</Text>
-          </TouchableOpacity>
-        </View>
-      </View>
-    </Modal>
-  );
+    return (
+        <div style={{ position: 'fixed', bottom: 0, left: 0, right: 0, background: '#1a1a1a', color: '#fff', padding: 24, borderTopLeftRadius: 16, borderTopRightRadius: 16, boxShadow: '0 -4px 10px rgba(0,0,0,0.3)', zIndex: 1000 }}>
+            <h2 style={{ margin: '0 0 8px 0' }}>🔒 Secure Your Progress</h2>
+            <p style={{ color: '#ccc', fontSize: 14, marginBottom: 16 }}>
+                Nice work. Your estimate is fully calculated using live regional pricing. Enter an email and password to lock in this record and claim your first 3 free projects.
+            </p>
+            <input type="email" placeholder="Your Email Address" value={email} onChange={e => setEmail(e.target.value)} style={{ width: '100%', padding: 10, margin: '8px 0', borderRadius: 4, border: 'none' }} />
+            <input type="password" placeholder="Create Password" value={password} onChange={e => setPassword(e.target.value)} style={{ width: '100%', padding: 10, margin: '8px 0', borderRadius: 4, border: 'none' }} />
+            <button onClick={() => onSave(email, password)} style={{ width: '100%', padding: 12, background: '#2e7d32', color: '#fff', border: 'none', borderRadius: 4, fontWeight: 'bold', marginTop: 12, cursor: 'pointer' }}>
+                💥 SECURE MY ACCOUNT & SAVE BID
+            </button>
+            <button onClick={onClose} style={{ width: '100%', padding: 8, background: 'none', color: '#aaa', border: 'none', marginTop: 8, cursor: 'pointer', fontSize: 12 }}>Cancel</button>
+        </div>
+    );
 }
-
-const styles = StyleSheet.create({
-  overlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.45)',
-    justifyContent: 'flex-end',
-  },
-  sheet: {
-    backgroundColor: '#FFF',
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-    padding: 24,
-    paddingBottom: 36,
-  },
-  title: {
-    fontSize: 18,
-    fontWeight: '700',
-    color: '#1A1A1A',
-    marginBottom: 8,
-  },
-  body: {
-    fontSize: 14,
-    color: '#555',
-    marginBottom: 24,
-    lineHeight: 20,
-  },
-  btn: {
-    borderRadius: 10,
-    paddingVertical: 14,
-    alignItems: 'center',
-    marginBottom: 10,
-  },
-  btnPrimary: {
-    backgroundColor: '#1A73E8',
-  },
-  btnPrimaryText: {
-    color: '#FFF',
-    fontSize: 15,
-    fontWeight: '600',
-  },
-  btnSecondary: {
-    backgroundColor: '#F1F3F4',
-  },
-  btnSecondaryText: {
-    color: '#1A1A1A',
-    fontSize: 15,
-    fontWeight: '600',
-  },
-  discardBtn: {
-    alignItems: 'center',
-    paddingVertical: 10,
-  },
-  discardText: {
-    color: '#D93025',
-    fontSize: 14,
-    fontWeight: '500',
-  },
-});
