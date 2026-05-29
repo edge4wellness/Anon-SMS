@@ -1,37 +1,62 @@
 /**
- * calcMaterialLineCost — qty × unit_cost for one materials row
+ * Core mathematical engine for CarpenterPro estimates.
+ * Sums costs and enforces the client-facing 'Lump Sum by Section' view rule.
  */
-export function calcMaterialLineCost(material) {
-  return (material.qty ?? 0) * (material.unit_cost ?? 0);
-}
+export function calculateProjectTotal(project, sections, materials, laborTasks, defaultMarkup) {
+    const markupMultiplier = 1 + (defaultMarkup / 100);
+    let totalProjectMaterialsCost = 0;
+    let totalProjectLaborCost = 0;
+    const sectionBreakdowns = {};
 
-/**
- * calcLaborLineCost — crew_size × hours_estimated × hourly_rate for one labor row
- */
-export function calcLaborLineCost(labor) {
-  return (labor.crew_size ?? 1) * (labor.hours_estimated ?? 0) * (labor.hourly_rate ?? 65);
-}
+    sections.forEach(section => {
+        sectionBreakdowns[section.section_id] = {
+            area_name: section.area_name,
+            raw_materials_subtotal: 0,
+            raw_labor_subtotal: 0
+        };
+    });
 
-/**
- * calcSectionTotals — returns { materialCost, laborCost, subtotal } for a section
- */
-export function calcSectionTotals(materials = [], laborRows = []) {
-  const materialCost = materials.reduce((sum, m) => sum + calcMaterialLineCost(m), 0);
-  const laborCost = laborRows.reduce((sum, l) => sum + calcLaborLineCost(l), 0);
-  return { materialCost, laborCost, subtotal: materialCost + laborCost };
-}
+    materials.forEach(mat => {
+        const cost = mat.qty * mat.unit_cost;
+        totalProjectMaterialsCost += cost;
+        if (sectionBreakdowns[mat.section_id]) {
+            sectionBreakdowns[mat.section_id].raw_materials_subtotal += cost;
+        }
+    });
 
-/**
- * calcProjectTotals — rolls up all sections, applies markup, returns total_bid
- */
-export function calcProjectTotals(materials = [], laborRows = [], markupPercent = 20) {
-  const totalMaterials = materials.reduce((sum, m) => sum + calcMaterialLineCost(m), 0);
-  const totalLabor = laborRows.reduce((sum, l) => sum + calcLaborLineCost(l), 0);
-  const base = totalMaterials + totalLabor;
-  const totalBid = base * (1 + markupPercent / 100);
-  return {
-    total_materials_cost: totalMaterials,
-    total_labor_cost: totalLabor,
-    total_bid: totalBid,
-  };
+    laborTasks.forEach(task => {
+        const cost = task.crew_size * task.hours_estimated * task.hourly_rate;
+        totalProjectLaborCost += cost;
+        if (sectionBreakdowns[task.section_id]) {
+            sectionBreakdowns[task.section_id].raw_labor_subtotal += cost;
+        }
+    });
+
+    const clientProposalSections = Object.keys(sectionBreakdowns).map(sectionId => {
+        const sec = sectionBreakdowns[sectionId];
+        const rawSectionTotal = sec.raw_materials_subtotal + sec.raw_labor_subtotal;
+        return {
+            section_id: sectionId,
+            area_name: sec.area_name,
+            lump_sum_price: Math.round((rawSectionTotal * markupMultiplier) * 100) / 100
+        };
+    });
+
+    const totalRawCostBasis = totalProjectMaterialsCost + totalProjectLaborCost;
+    const finalTotalBid = Math.round((totalRawCostBasis * markupMultiplier) * 100) / 100;
+
+    return {
+        database_update: {
+            project_id: project.project_id,
+            total_materials_cost: totalProjectMaterialsCost,
+            total_labor_cost: totalProjectLaborCost,
+            markup_percent: defaultMarkup,
+            total_bid: finalTotalBid,
+            last_modified_at: new Date().toISOString()
+        },
+        client_proposal_view: {
+            sections: clientProposalSections,
+            grand_total: finalTotalBid
+        }
+    };
 }

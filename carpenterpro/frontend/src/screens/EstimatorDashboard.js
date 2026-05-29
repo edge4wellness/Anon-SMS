@@ -1,4 +1,4 @@
-import React, { useEffect, useReducer, useState } from 'react';
+import React, { useEffect, useReducer, useState, useMemo } from 'react';
 import {
   SafeAreaView,
   View,
@@ -18,12 +18,12 @@ import {
   getLaborForProject,
 } from '../database/localCache';
 import { pushPendingChanges } from '../database/syncEngine';
-import { calcProjectTotals, calcMaterialLineCost, calcLaborLineCost } from '../utils/calcEngine';
+import { calculateProjectTotal } from '../utils/calcEngine';
 import SaveProgressModal from '../components/SaveProgressModal';
 
 // ── Reducer ───────────────────────────────────────────────────────────────────
 
-function projectReducer(state, action) {
+function reducer(state, action) {
   switch (action.type) {
     case 'LOAD':
       return action.payload;
@@ -50,12 +50,12 @@ function projectReducer(state, action) {
   }
 }
 
-const EMPTY_STATE = { sections: [], materials: [], labor: [] };
+const EMPTY = { sections: [], materials: [], labor: [] };
 
 // ── Component ─────────────────────────────────────────────────────────────────
 
 export default function EstimatorDashboard({ project, authToken, onBack }) {
-  const [state, dispatch] = useReducer(projectReducer, EMPTY_STATE);
+  const [state, dispatch] = useReducer(reducer, EMPTY);
   const [dirty, setDirty] = useState(false);
   const [showSaveModal, setShowSaveModal] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -72,8 +72,28 @@ export default function EstimatorDashboard({ project, authToken, onBack }) {
     load();
   }, [project.project_id]);
 
+  // Live recalculation on every state change
+  const calc = useMemo(() => {
+    if (!state.sections.length) return null;
+    return calculateProjectTotal(
+      project,
+      state.sections,
+      state.materials,
+      state.labor,
+      project.markup_percent ?? 20
+    );
+  }, [project, state]);
+
+  // Map section_id → lump_sum_price for the proposal view
+  const lumpSumBySectionId = useMemo(() => {
+    if (!calc) return {};
+    return Object.fromEntries(
+      calc.client_proposal_view.sections.map(s => [s.section_id, s.lump_sum_price])
+    );
+  }, [calc]);
+
   function updateMaterial(materialId, field, raw) {
-    const value = field === 'item_name' || field === 'unit' || field === 'category'
+    const value = ['item_name', 'unit', 'category'].includes(field)
       ? raw
       : parseFloat(raw) || 0;
     dispatch({ type: 'UPDATE_MATERIAL', materialId, field, value });
@@ -86,11 +106,9 @@ export default function EstimatorDashboard({ project, authToken, onBack }) {
     setDirty(true);
   }
 
-  const totals = calcProjectTotals(state.materials, state.labor, project.markup_percent ?? 20);
-
   async function persistAll() {
-    const now = new Date().toISOString();
-    const updatedProject = { ...project, ...totals, last_modified_at: now };
+    if (!calc) return;
+    const updatedProject = { ...project, ...calc.database_update };
     await upsertProject(updatedProject);
     await Promise.all(state.materials.map(upsertMaterial));
     await Promise.all(state.labor.map(upsertLabor));
@@ -116,18 +134,15 @@ export default function EstimatorDashboard({ project, authToken, onBack }) {
     else onBack();
   }
 
-  // Group materials and labor by section for display
-  const sectionMap = Object.fromEntries(
-    state.sections.map(s => [s.section_id, s])
-  );
+  // Group materials and labor by section_id for display
   const materialsBySection = {};
   const laborBySection = {};
-  state.materials.forEach(m => {
-    (materialsBySection[m.section_id] ??= []).push(m);
-  });
-  state.labor.forEach(l => {
-    (laborBySection[l.section_id] ??= []).push(l);
-  });
+  state.materials.forEach(m => { (materialsBySection[m.section_id] ??= []).push(m); });
+  state.labor.forEach(l => { (laborBySection[l.section_id] ??= []).push(l); });
+
+  const grandTotal = calc?.client_proposal_view.grand_total ?? 0;
+  const totalMaterials = calc?.database_update.total_materials_cost ?? 0;
+  const totalLabor = calc?.database_update.total_labor_cost ?? 0;
 
   return (
     <SafeAreaView style={styles.safe}>
@@ -146,32 +161,28 @@ export default function EstimatorDashboard({ project, authToken, onBack }) {
         </TouchableOpacity>
       </View>
 
-      {/* Bid banner */}
+      {/* Bid banner — shows database_update totals */}
       <View style={styles.banner}>
         <View style={styles.bannerRow}>
-          <Text style={styles.bannerItem}>
-            Materials{'\n'}
-            <Text style={styles.bannerValue}>
-              ${totals.total_materials_cost.toFixed(2)}
-            </Text>
-          </Text>
+          <View style={styles.bannerCell}>
+            <Text style={styles.bannerLabel}>Materials</Text>
+            <Text style={styles.bannerValue}>${totalMaterials.toFixed(2)}</Text>
+          </View>
           <Text style={styles.bannerDivider}>|</Text>
-          <Text style={styles.bannerItem}>
-            Labor{'\n'}
-            <Text style={styles.bannerValue}>
-              ${totals.total_labor_cost.toFixed(2)}
-            </Text>
-          </Text>
+          <View style={styles.bannerCell}>
+            <Text style={styles.bannerLabel}>Labor</Text>
+            <Text style={styles.bannerValue}>${totalLabor.toFixed(2)}</Text>
+          </View>
           <Text style={styles.bannerDivider}>|</Text>
-          <Text style={styles.bannerItem}>
-            Total Bid{'\n'}
+          <View style={styles.bannerCell}>
+            <Text style={styles.bannerLabel}>Total Bid</Text>
             <Text style={[styles.bannerValue, styles.bannerBid]}>
-              ${totals.total_bid.toFixed(2)}
+              ${grandTotal.toFixed(2)}
             </Text>
-          </Text>
+          </View>
         </View>
         <Text style={styles.bannerMarkup}>
-          {project.markup_percent ?? 20}% markup applied
+          {project.markup_percent ?? 20}% markup · client sees lump sum per section
         </Text>
       </View>
 
@@ -179,17 +190,26 @@ export default function EstimatorDashboard({ project, authToken, onBack }) {
         {state.sections.map(section => {
           const mats = materialsBySection[section.section_id] ?? [];
           const labs = laborBySection[section.section_id] ?? [];
+          const lumpSum = lumpSumBySectionId[section.section_id] ?? 0;
+
           return (
             <View key={section.section_id} style={styles.sectionCard}>
-              <Text style={styles.sectionTitle}>{section.area_name}</Text>
+              {/* Section header — lump_sum_price from client_proposal_view */}
+              <View style={styles.sectionHeader}>
+                <Text style={styles.sectionTitle}>{section.area_name}</Text>
+                <View style={styles.lumpBadge}>
+                  <Text style={styles.lumpLabel}>Client Price</Text>
+                  <Text style={styles.lumpValue}>${lumpSum.toFixed(2)}</Text>
+                </View>
+              </View>
 
-              {/* Materials */}
+              {/* Materials input rows */}
               {mats.length > 0 && (
                 <>
                   <Text style={styles.groupLabel}>MATERIALS</Text>
                   {mats.map(m => (
                     <View key={m.material_id} style={styles.lineRow}>
-                      <Text style={styles.lineDesc} numberOfLines={2}>{m.item_name}</Text>
+                      <Text style={styles.lineDesc} numberOfLines={1}>{m.item_name}</Text>
                       <View style={styles.lineFields}>
                         <View style={styles.microField}>
                           <Text style={styles.microLabel}>Qty</Text>
@@ -210,7 +230,7 @@ export default function EstimatorDashboard({ project, authToken, onBack }) {
                           />
                         </View>
                         <Text style={styles.lineTotal}>
-                          ${calcMaterialLineCost(m).toFixed(2)}
+                          ${(m.qty * m.unit_cost).toFixed(2)}
                         </Text>
                       </View>
                     </View>
@@ -218,13 +238,13 @@ export default function EstimatorDashboard({ project, authToken, onBack }) {
                 </>
               )}
 
-              {/* Labor */}
+              {/* Labor input rows */}
               {labs.length > 0 && (
                 <>
                   <Text style={[styles.groupLabel, { marginTop: 10 }]}>LABOR</Text>
                   {labs.map(l => (
                     <View key={l.labor_id} style={styles.lineRow}>
-                      <Text style={styles.lineDesc} numberOfLines={2}>{l.task_description}</Text>
+                      <Text style={styles.lineDesc} numberOfLines={1}>{l.task_description}</Text>
                       <View style={styles.lineFields}>
                         <View style={styles.microField}>
                           <Text style={styles.microLabel}>Crew</Text>
@@ -254,7 +274,7 @@ export default function EstimatorDashboard({ project, authToken, onBack }) {
                           />
                         </View>
                         <Text style={styles.lineTotal}>
-                          ${calcLaborLineCost(l).toFixed(2)}
+                          ${(l.crew_size * l.hours_estimated * l.hourly_rate).toFixed(2)}
                         </Text>
                       </View>
                     </View>
@@ -291,14 +311,31 @@ const styles = StyleSheet.create({
   navBtn: { fontSize: 15, color: '#1A73E8', fontWeight: '500', minWidth: 60 },
   navBtnRight: { textAlign: 'right' },
   navBtnDisabled: { color: '#AAA' },
-  title: { flex: 1, fontSize: 16, fontWeight: '700', color: '#1A1A1A', textAlign: 'center', paddingHorizontal: 8 },
+  title: {
+    flex: 1,
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#1A1A1A',
+    textAlign: 'center',
+    paddingHorizontal: 8,
+  },
   banner: { backgroundColor: '#1A73E8', paddingVertical: 14, paddingHorizontal: 16 },
-  bannerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  bannerItem: { fontSize: 12, color: 'rgba(255,255,255,0.8)', textAlign: 'center', flex: 1 },
-  bannerValue: { fontSize: 16, fontWeight: '700', color: '#FFF' },
+  bannerRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  bannerCell: { flex: 1, alignItems: 'center' },
+  bannerLabel: { fontSize: 11, color: 'rgba(255,255,255,0.75)', marginBottom: 2 },
+  bannerValue: { fontSize: 15, fontWeight: '700', color: '#FFF' },
   bannerBid: { fontSize: 20 },
   bannerDivider: { color: 'rgba(255,255,255,0.3)', fontSize: 20 },
-  bannerMarkup: { fontSize: 11, color: 'rgba(255,255,255,0.6)', textAlign: 'center', marginTop: 4 },
+  bannerMarkup: {
+    fontSize: 11,
+    color: 'rgba(255,255,255,0.6)',
+    textAlign: 'center',
+    marginTop: 6,
+  },
   scroll: { padding: 12 },
   sectionCard: {
     backgroundColor: '#FFF',
@@ -311,8 +348,23 @@ const styles = StyleSheet.create({
     shadowRadius: 3,
     elevation: 2,
   },
-  sectionTitle: { fontSize: 15, fontWeight: '700', color: '#1A1A1A', marginBottom: 8 },
-  groupLabel: { fontSize: 10, fontWeight: '700', color: '#AAA', letterSpacing: 0.8, marginBottom: 6 },
+  sectionHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 10,
+  },
+  sectionTitle: { fontSize: 15, fontWeight: '700', color: '#1A1A1A', flex: 1 },
+  lumpBadge: { alignItems: 'flex-end' },
+  lumpLabel: { fontSize: 10, color: '#AAA', fontWeight: '600' },
+  lumpValue: { fontSize: 16, fontWeight: '800', color: '#1A73E8' },
+  groupLabel: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#AAA',
+    letterSpacing: 0.8,
+    marginBottom: 6,
+  },
   lineRow: { marginBottom: 8 },
   lineDesc: { fontSize: 13, color: '#333', marginBottom: 4 },
   lineFields: { flexDirection: 'row', alignItems: 'center', gap: 6 },
@@ -328,6 +380,14 @@ const styles = StyleSheet.create({
     color: '#1A1A1A',
     width: 60,
     textAlign: 'center',
+    backgroundColor: '#FAFAFA',
   },
-  lineTotal: { fontSize: 13, fontWeight: '700', color: '#1A73E8', marginLeft: 'auto' },
+  lineTotal: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#555',
+    marginLeft: 'auto',
+    minWidth: 70,
+    textAlign: 'right',
+  },
 });
