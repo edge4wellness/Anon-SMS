@@ -1,54 +1,37 @@
 /**
- * calcSectionTotal
- * Returns the total cost for one section: (material + labor) × qty.
- * qty defaults to 1 so a zero qty doesn't zero out the line.
+ * calcMaterialLineCost — qty × unit_cost for one materials row
  */
-export function calcSectionTotal(section) {
-  const { material_cost = 0, labor_cost = 0, qty = 1 } = section;
-  const effectiveQty = qty > 0 ? qty : 1;
-  return (material_cost + labor_cost) * effectiveQty;
+export function calcMaterialLineCost(material) {
+  return (material.qty ?? 0) * (material.unit_cost ?? 0);
 }
 
 /**
- * calcLumpSum
- * Sums all section totals into the project's single lump-sum estimate.
+ * calcLaborLineCost — crew_size × hours_estimated × hourly_rate for one labor row
  */
-export function calcLumpSum(sections = []) {
-  return sections.reduce((acc, s) => acc + calcSectionTotal(s), 0);
+export function calcLaborLineCost(labor) {
+  return (labor.crew_size ?? 1) * (labor.hours_estimated ?? 0) * (labor.hourly_rate ?? 65);
 }
 
 /**
- * calcMaterialSubtotal / calcLaborSubtotal
- * Convenience breakdowns used in print/export views.
+ * calcSectionTotals — returns { materialCost, laborCost, subtotal } for a section
  */
-export function calcMaterialSubtotal(sections = []) {
-  return sections.reduce((acc, s) => {
-    const qty = s.qty > 0 ? s.qty : 1;
-    return acc + (s.material_cost ?? 0) * qty;
-  }, 0);
-}
-
-export function calcLaborSubtotal(sections = []) {
-  return sections.reduce((acc, s) => {
-    const qty = s.qty > 0 ? s.qty : 1;
-    return acc + (s.labor_cost ?? 0) * qty;
-  }, 0);
+export function calcSectionTotals(materials = [], laborRows = []) {
+  const materialCost = materials.reduce((sum, m) => sum + calcMaterialLineCost(m), 0);
+  const laborCost = laborRows.reduce((sum, l) => sum + calcLaborLineCost(l), 0);
+  return { materialCost, laborCost, subtotal: materialCost + laborCost };
 }
 
 /**
- * applyMarkup
- * Applies a percentage markup to a base cost. markup = 0.15 → +15%.
+ * calcProjectTotals — rolls up all sections, applies markup, returns total_bid
  */
-export function applyMarkup(baseCost, markup = 0) {
-  return baseCost * (1 + markup);
-}
-
-/**
- * applyTax
- * Applies a sales tax rate to material costs only.
- * taxRate = 0.08 → 8% tax.
- */
-export function applyTax(sections = [], taxRate = 0) {
-  const materialBase = calcMaterialSubtotal(sections);
-  return materialBase * taxRate;
+export function calcProjectTotals(materials = [], laborRows = [], markupPercent = 20) {
+  const totalMaterials = materials.reduce((sum, m) => sum + calcMaterialLineCost(m), 0);
+  const totalLabor = laborRows.reduce((sum, l) => sum + calcLaborLineCost(l), 0);
+  const base = totalMaterials + totalLabor;
+  const totalBid = base * (1 + markupPercent / 100);
+  return {
+    total_materials_cost: totalMaterials,
+    total_labor_cost: totalLabor,
+    total_bid: totalBid,
+  };
 }

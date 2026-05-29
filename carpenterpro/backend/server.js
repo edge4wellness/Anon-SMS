@@ -18,37 +18,33 @@ const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 
-const schema = fs.readFileSync(path.join(__dirname, 'database', 'schema.sql'), 'utf8');
-db.exec(schema);
+db.exec(fs.readFileSync(path.join(__dirname, 'database', 'schema.sql'), 'utf8'));
+db.exec(fs.readFileSync(path.join(__dirname, 'database', 'seed_data.sql'), 'utf8'));
 
-const seedPath = path.join(__dirname, 'database', 'seed_data.sql');
-if (fs.existsSync(seedPath)) {
-  db.exec(fs.readFileSync(seedPath, 'utf8'));
-}
-
-// ── Auth helpers (JWT-lite placeholder) ───────────────────────────────────────
+// ── Auth middleware (JWT placeholder) ─────────────────────────────────────────
 
 function requireAuth(req, res, next) {
   const token = req.headers.authorization?.split(' ')[1];
   if (!token) return res.status(401).json({ error: 'Unauthorized' });
-  // TODO: replace with real JWT verification
-  req.userId = token;
+  req.userId = token; // TODO: verify real JWT
   next();
 }
 
-// ── User endpoints ────────────────────────────────────────────────────────────
+// ── Users ─────────────────────────────────────────────────────────────────────
 
 app.post('/users/register', (req, res) => {
-  const { email, businessName, zipCode } = req.body;
-  if (!email || !businessName || !zipCode) {
-    return res.status(400).json({ error: 'email, businessName, and zipCode are required' });
+  const { businessName, email, phone, zipCode } = req.body;
+  if (!businessName || !email || !zipCode) {
+    return res.status(400).json({ error: 'businessName, email, and zipCode are required' });
   }
-  const id = uuidv4();
+  const userId = `USR-${Date.now()}`;
+  const now = new Date().toISOString();
   try {
     db.prepare(
-      'INSERT INTO users (id, email, business_name, zip_code) VALUES (?, ?, ?, ?)'
-    ).run(id, email.toLowerCase(), businessName, zipCode);
-    res.status(201).json({ id, email, businessName, zipCode });
+      `INSERT INTO users (user_id, business_name, email, phone, region_zip_code, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    ).run(userId, businessName, email.toLowerCase(), phone ?? null, zipCode, now);
+    res.status(201).json({ userId, businessName, email, zipCode });
   } catch (err) {
     if (err.code === 'SQLITE_CONSTRAINT_UNIQUE') {
       return res.status(409).json({ error: 'Email already registered' });
@@ -57,75 +53,122 @@ app.post('/users/register', (req, res) => {
   }
 });
 
-app.get('/users/:id', requireAuth, (req, res) => {
-  const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.params.id);
+app.get('/users/:userId', requireAuth, (req, res) => {
+  const user = db.prepare('SELECT * FROM users WHERE user_id = ?').get(req.params.userId);
   if (!user) return res.status(404).json({ error: 'User not found' });
   res.json(user);
 });
 
-// ── Template endpoints ────────────────────────────────────────────────────────
-
-app.get('/templates', (req, res) => {
-  const templates = db.prepare('SELECT * FROM project_templates').all();
-  res.json(templates.map(t => ({ ...t, sections: JSON.parse(t.sections) })));
-});
-
-// ── Project endpoints ─────────────────────────────────────────────────────────
+// ── Projects ──────────────────────────────────────────────────────────────────
 
 app.get('/projects', requireAuth, (req, res) => {
   const projects = db
-    .prepare('SELECT * FROM projects WHERE user_id = ? ORDER BY updated_at DESC')
+    .prepare('SELECT * FROM projects WHERE user_id = ? ORDER BY last_modified_at DESC')
     .all(req.userId);
   res.json(projects);
 });
 
 app.post('/projects', requireAuth, (req, res) => {
-  const { templateId, name } = req.body;
-  if (!templateId || !name) {
-    return res.status(400).json({ error: 'templateId and name are required' });
-  }
-  const id = uuidv4();
+  const { customerName, customerAddress, projectType, markupPercent } = req.body;
+  const projectId = `PRJ-${Date.now()}`;
+  const now = new Date().toISOString();
   db.prepare(
-    'INSERT INTO projects (id, user_id, template_id, name) VALUES (?, ?, ?, ?)'
-  ).run(id, req.userId, templateId, name);
-  res.status(201).json({ id, userId: req.userId, templateId, name, status: 'active' });
+    `INSERT INTO projects (project_id, user_id, customer_name, customer_address, project_type, markup_percent, created_at, last_modified_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(projectId, req.userId, customerName ?? null, customerAddress ?? null,
+        projectType ?? null, markupPercent ?? 20.0, now, now);
+  res.status(201).json({ projectId, status: 'draft' });
 });
 
-// ── Cloud sync endpoint ───────────────────────────────────────────────────────
-// Accepts a batch of project_sections from the device, applies last-write-wins
-// using the client-supplied updated_at timestamp.
+app.get('/projects/:projectId', requireAuth, (req, res) => {
+  const project = db.prepare('SELECT * FROM projects WHERE project_id = ? AND user_id = ?')
+    .get(req.params.projectId, req.userId);
+  if (!project) return res.status(404).json({ error: 'Project not found' });
+
+  const sections = db.prepare('SELECT * FROM sections WHERE project_id = ?')
+    .all(project.project_id);
+  const materials = db.prepare('SELECT * FROM materials WHERE project_id = ?')
+    .all(project.project_id);
+  const laborRows = db.prepare('SELECT * FROM labor WHERE project_id = ?')
+    .all(project.project_id);
+
+  res.json({ ...project, sections, materials, labor: laborRows });
+});
+
+// ── Sections ──────────────────────────────────────────────────────────────────
+
+app.post('/projects/:projectId/sections', requireAuth, (req, res) => {
+  const { areaName, lengthFt, widthFt } = req.body;
+  if (!areaName) return res.status(400).json({ error: 'areaName is required' });
+  const sectionId = `SEC-${Date.now()}`;
+  db.prepare(
+    `INSERT INTO sections (section_id, project_id, area_name, length_ft, width_ft)
+     VALUES (?, ?, ?, ?, ?)`
+  ).run(sectionId, req.params.projectId, areaName, lengthFt ?? null, widthFt ?? null);
+  res.status(201).json({ sectionId });
+});
+
+// ── Cloud sync ────────────────────────────────────────────────────────────────
+// Accepts full project payload from device. Uses last_modified_at for
+// last-write-wins conflict resolution — the server only updates a project
+// if the incoming timestamp is newer.
 
 app.post('/sync', requireAuth, (req, res) => {
-  const { sections = [] } = req.body;
-  if (!Array.isArray(sections)) {
-    return res.status(400).json({ error: 'sections must be an array' });
+  const { projects: incoming = [] } = req.body;
+  if (!Array.isArray(incoming)) {
+    return res.status(400).json({ error: 'projects must be an array' });
   }
 
-  const upsert = db.prepare(`
-    INSERT INTO project_sections (id, project_id, section_key, material_cost, labor_cost, qty, unit, notes, updated_at)
-    VALUES (@id, @project_id, @section_key, @material_cost, @labor_cost, @qty, @unit, @notes, @updated_at)
-    ON CONFLICT(id) DO UPDATE SET
-      material_cost = excluded.material_cost,
-      labor_cost    = excluded.labor_cost,
-      qty           = excluded.qty,
-      unit          = excluded.unit,
-      notes         = excluded.notes,
-      updated_at    = excluded.updated_at
-    WHERE excluded.updated_at > project_sections.updated_at
+  const upsertProject = db.prepare(`
+    INSERT INTO projects
+      (project_id, user_id, customer_name, customer_address, project_type, status,
+       total_materials_cost, total_labor_cost, markup_percent, total_bid, created_at, last_modified_at)
+    VALUES
+      (@project_id, @user_id, @customer_name, @customer_address, @project_type, @status,
+       @total_materials_cost, @total_labor_cost, @markup_percent, @total_bid, @created_at, @last_modified_at)
+    ON CONFLICT(project_id) DO UPDATE SET
+      customer_name        = excluded.customer_name,
+      customer_address     = excluded.customer_address,
+      project_type         = excluded.project_type,
+      status               = excluded.status,
+      total_materials_cost = excluded.total_materials_cost,
+      total_labor_cost     = excluded.total_labor_cost,
+      markup_percent       = excluded.markup_percent,
+      total_bid            = excluded.total_bid,
+      last_modified_at     = excluded.last_modified_at
+    WHERE excluded.last_modified_at > projects.last_modified_at
   `);
 
-  const syncMany = db.transaction((rows) => rows.forEach(r => upsert.run(r)));
-  syncMany(sections);
+  const upsertMaterial = db.prepare(`
+    INSERT OR REPLACE INTO materials
+      (material_id, section_id, project_id, item_name, category, qty, unit, unit_cost)
+    VALUES
+      (@material_id, @section_id, @project_id, @item_name, @category, @qty, @unit, @unit_cost)
+  `);
 
-  db.prepare(
-    'INSERT INTO sync_log (user_id, action, payload_hash) VALUES (?, ?, ?)'
-  ).run(req.userId, 'push', String(sections.length));
+  const upsertLabor = db.prepare(`
+    INSERT OR REPLACE INTO labor
+      (labor_id, section_id, project_id, task_description, crew_size, hours_estimated, hourly_rate)
+    VALUES
+      (@labor_id, @section_id, @project_id, @task_description, @crew_size, @hours_estimated, @hourly_rate)
+  `);
 
-  res.json({ synced: sections.length });
+  const syncBatch = db.transaction((rows) => {
+    let synced = 0;
+    for (const p of rows) {
+      upsertProject.run({ ...p, user_id: req.userId });
+      (p.materials ?? []).forEach(m => upsertMaterial.run(m));
+      (p.labor ?? []).forEach(l => upsertLabor.run(l));
+      synced++;
+    }
+    return synced;
+  });
+
+  const synced = syncBatch(incoming);
+  res.json({ synced });
 });
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 
 app.listen(PORT, () => console.log(`CarpenterPro server listening on port ${PORT}`));
-
 module.exports = app;

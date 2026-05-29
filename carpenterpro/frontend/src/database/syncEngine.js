@@ -1,73 +1,114 @@
-import { getPendingSyncRows, getSectionsForProject, clearSyncedRows } from './localCache';
+import {
+  getProjectById,
+  getMaterialsForProject,
+  getLaborForProject,
+  getPendingSyncRows,
+  clearSyncedRows,
+  upsertProject,
+  upsertMaterial,
+  upsertLabor,
+} from './localCache';
 
-const API_BASE = process.env.EXPO_PUBLIC_API_URL ?? 'http://localhost:3000';
+const API_BASE = 'https://api.carpenterpro.com/v1';
 
 /**
- * Push all locally-modified sections to the cloud.
- * Uses last-write-wins: the server only applies a row if its updated_at is
- * newer than what the server already has.
+ * Synchronizes a locally modified project with the cloud database.
+ * Enforces Option A: Protects local data using timestamp reconciliation.
+ */
+async function syncProjectToCloud(localProject, cloudProjectMirror) {
+  const localTimestamp = new Date(localProject.last_modified_at).getTime();
+  const cloudTimestamp = new Date(cloudProjectMirror.last_modified_at).getTime();
+
+  // If local changes are newer than what is on the server, update the cloud vault
+  if (localTimestamp > cloudTimestamp) {
+    console.log(`🚀 Local project ${localProject.project_id} is newer. Syncing to cloud...`);
+
+    const response = await fetch(`${API_BASE}/projects/sync`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        project: localProject,
+        sync_timestamp: new Date().toISOString(),
+      }),
+    });
+
+    if (response.ok) {
+      console.log('✅ Cloud sync successful. Local-first vault secured.');
+      return true;
+    } else {
+      console.error('❌ Network push failed. Data safely preserved locally in SQLite cache.');
+      return false;
+    }
+  }
+
+  console.log('🤝 Cloud data is up to date or newer. No sync override required.');
+  return false;
+}
+
+/**
+ * Fetches the cloud mirror for a project so we can compare timestamps.
+ */
+async function fetchCloudMirror(projectId, authToken) {
+  const res = await fetch(`${API_BASE}/projects/${projectId}`, {
+    headers: { Authorization: `Bearer ${authToken}` },
+  });
+  if (!res.ok) return null;
+  return res.json();
+}
+
+/**
+ * Iterates all locally-pending projects, fetches their cloud mirrors, and
+ * calls syncProjectToCloud for each one that is newer locally.
  */
 export async function pushPendingChanges(authToken) {
   const pending = await getPendingSyncRows();
   if (!pending.length) return { pushed: 0 };
 
-  // Gather unique project IDs from pending section rows
-  const projectSectionRows = pending.filter(r => r.table_name === 'project_sections');
-  const projectIds = [...new Set(projectSectionRows.map(r => r.row_id))];
+  const projectIds = [...new Set(pending.map(r => r.row_id))];
+  let pushed = 0;
 
-  const allSections = (
-    await Promise.all(projectIds.map(pid => getSectionsForProject(pid)))
-  ).flat();
+  await Promise.all(
+    projectIds.map(async (pid) => {
+      const local = await getProjectById(pid);
+      if (!local) return;
 
-  if (!allSections.length) {
-    await clearSyncedRows(pending.map(r => r.id));
-    return { pushed: 0 };
-  }
+      const materials = await getMaterialsForProject(pid);
+      const labor = await getLaborForProject(pid);
+      const localFull = { ...local, materials, labor };
 
-  const res = await fetch(`${API_BASE}/sync`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${authToken}`,
-    },
-    body: JSON.stringify({ sections: allSections }),
-  });
+      // Fetch cloud mirror — treat a missing remote as an empty placeholder
+      const cloudMirror = (await fetchCloudMirror(pid, authToken)) ?? {
+        last_modified_at: new Date(0).toISOString(),
+      };
 
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`Sync failed (${res.status}): ${body}`);
-  }
+      const didSync = await syncProjectToCloud(localFull, cloudMirror);
+      if (didSync) pushed++;
+    })
+  );
 
   await clearSyncedRows(pending.map(r => r.id));
-  const { synced } = await res.json();
-  return { pushed: synced };
+  return { pushed };
 }
 
 /**
- * Pull the latest sections for a project from the cloud and reconcile with
- * local state using last-write-wins on updated_at.
+ * Pull a project from the cloud and merge into local storage.
+ * Remote wins only when its last_modified_at is strictly newer than local.
  */
-export async function pullProjectSections(projectId, authToken, upsertSection) {
-  const res = await fetch(`${API_BASE}/projects/${projectId}/sections`, {
+export async function pullProject(projectId, authToken) {
+  const res = await fetch(`${API_BASE}/projects/${projectId}`, {
     headers: { Authorization: `Bearer ${authToken}` },
   });
-
   if (!res.ok) throw new Error(`Pull failed (${res.status})`);
 
-  const remoteSections = await res.json();
-  const localSections = await getSectionsForProject(projectId);
+  const remote = await res.json();
+  const local = await getProjectById(projectId);
 
-  const localMap = Object.fromEntries(localSections.map(s => [s.id, s]));
-
-  let conflictsResolved = 0;
-  for (const remote of remoteSections) {
-    const local = localMap[remote.id];
-    // Remote wins only if it is strictly newer than local
-    if (!local || new Date(remote.updated_at) > new Date(local.updated_at)) {
-      await upsertSection(remote);
-      conflictsResolved++;
-    }
+  if (!local || new Date(remote.last_modified_at) > new Date(local.last_modified_at)) {
+    await upsertProject(remote);
+    await Promise.all((remote.materials ?? []).map(upsertMaterial));
+    await Promise.all((remote.labor ?? []).map(upsertLabor));
+    return { updated: true };
   }
 
-  return { pulled: remoteSections.length, conflictsResolved };
+  return { updated: false };
 }

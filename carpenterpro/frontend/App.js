@@ -5,7 +5,6 @@ import OnboardingScreen from './src/screens/OnboardingScreen';
 import TemplateSelector from './src/screens/TemplateSelector';
 import EstimatorDashboard from './src/screens/EstimatorDashboard';
 
-// Navigation states
 const SCREEN = {
   LOADING: 'loading',
   ONBOARDING: 'onboarding',
@@ -17,8 +16,7 @@ export default function App() {
   const [screen, setScreen] = useState(SCREEN.LOADING);
   const [user, setUser] = useState(null);
   const [authToken, setAuthToken] = useState(null);
-  const [project, setProject] = useState(null);
-  const [template, setTemplate] = useState(null);
+  const [activeProject, setActiveProject] = useState(null);
 
   useEffect(() => {
     async function boot() {
@@ -30,23 +28,41 @@ export default function App() {
   }, []);
 
   async function handleOnboardingComplete({ zipCode, businessName }) {
-    // TODO: POST /users/register and receive a real auth token
-    const mockUser = { id: 'local-user', zipCode, businessName };
-    setUser(mockUser);
-    setAuthToken(mockUser.id);
+    // TODO: POST /users/register → receive real JWT
+    const userId = `USR-${Date.now()}`;
+    const now = new Date().toISOString();
+    const newUser = {
+      user_id: userId,
+      business_name: businessName,
+      email: `${userId}@local`,
+      region_zip_code: zipCode,
+      created_at: now,
+      subscription_tier: 'free',
+      default_markup_percent: 20.0,
+    };
+    setUser(newUser);
+    setAuthToken(userId);
     setScreen(SCREEN.TEMPLATE_SELECT);
   }
 
-  function handleTemplateSelected(selectedTemplate) {
-    const newProject = {
-      id: `proj-${Date.now()}`,
-      templateId: selectedTemplate.id,
-      name: `${selectedTemplate.name} – ${new Date().toLocaleDateString()}`,
-      status: 'active',
-      updatedAt: new Date().toISOString(),
+  function handleTemplateSelected(template) {
+    const now = new Date().toISOString();
+    const project = {
+      project_id: `PRJ-${Date.now()}`,
+      user_id: user.user_id,
+      customer_name: null,
+      customer_address: null,
+      project_type: template.name,
+      status: 'draft',
+      total_materials_cost: 0,
+      total_labor_cost: 0,
+      markup_percent: user.default_markup_percent,
+      total_bid: 0,
+      created_at: now,
+      last_modified_at: now,
+      _template: template,
     };
-    setProject(newProject);
-    setTemplate(selectedTemplate);
+    setActiveProject(project);
     setScreen(SCREEN.ESTIMATOR);
   }
 
@@ -74,8 +90,7 @@ export default function App() {
   if (screen === SCREEN.ESTIMATOR) {
     return (
       <EstimatorDashboard
-        project={project}
-        template={template}
+        project={activeProject}
         authToken={authToken}
         onBack={() => setScreen(SCREEN.TEMPLATE_SELECT)}
       />
