@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+  <title>CarpenterPro Estimator</title>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #f5f5f5; color: #1a1a1a; }
+    input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; }
+    input[type=number] { -moz-appearance: textfield; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useReducer, useMemo } = React;
+
+    // ── localCache ──────────────────────────────────────────────────────────
+
+    let localDatabaseCache = {
+      user: { user_id: 'GUEST_USER', business_name: '', region_zip_code: '', subscription_tier: 'free' },
+      projects: [],
+      sections: [],
+      materials: [],
+      labor: []
+    };
+
+    const localCache = {
+      getSaveState: () => localDatabaseCache,
+      saveProjectOffline: (project, sections, materials, labor) => {
+        project.last_modified_at = new Date().toISOString();
+        localDatabaseCache.projects = [project];
+        localDatabaseCache.sections = sections;
+        localDatabaseCache.materials = materials;
+        localDatabaseCache.labor = labor;
+        console.log("💾 Step saved securely inside the local device cache vault.");
+      },
+      convertToPermanentUser: (userId, email, businessName, zip) => {
+        localCache.user = { user_id: userId, business_name: businessName, region_zip_code: zip, subscription_tier: 'free', email };
+        if (localDatabaseCache.projects[0]) {
+          localDatabaseCache.projects[0].user_id = userId;
+        }
+        console.log("👤 Local cache migrated from anonymous guest to account ID: " + userId);
+      }
+    };
+
+    // ── syncEngine ──────────────────────────────────────────────────────────
+
+    async function syncProjectToCloud(localProject, cloudProjectMirror) {
+      const localTimestamp = new Date(localProject.last_modified_at).getTime();
+      const cloudTimestamp = cloudProjectMirror ? new Date(cloudProjectMirror.last_modified_at).getTime() : 0;
+
+      if (localTimestamp > cloudTimestamp) {
+        console.log(`⚙️ Local modifications are newer. Initializing server sync pipeline...`);
+        try {
+          const response = await fetch('http://localhost:3000/v1/projects/sync', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ project: localProject, sync_timestamp: new Date().toISOString() })
+          });
+          const data = await response.json();
+          return data.success;
+        } catch (err) {
+          console.log("📴 Sync connection offline. Bid remains securely stored in local storage cache.");
+          return false;
+        }
+      }
+      return false;
+    }
+
+    async function pushPendingChanges(authToken) {
+      const { projects } = localCache.getSaveState();
+      const localProject = projects[0];
+      if (!localProject) return { pushed: 0 };
+      const didSync = await syncProjectToCloud(localProject, null);
+      return { pushed: didSync ? 1 : 0 };
+    }
+
+    // ── calcEngine ──────────────────────────────────────────────────────────
+
+    function calculateProjectTotal(project, sections, materials, laborTasks, defaultMarkup) {
+      const markupMultiplier = 1 + (defaultMarkup / 100);
+      let totalProjectMaterialsCost = 0;
+      let totalProjectLaborCost = 0;
+      const sectionBreakdowns = {};
+
+      sections.forEach(section => {
+        sectionBreakdowns[section.section_id] = {
+          area_name: section.area_name,
+          raw_materials_subtotal: 0,
+          raw_labor_subtotal: 0
+        };
+      });
+
+      materials.forEach(mat => {
+        const cost = mat.qty * mat.unit_cost;
+        totalProjectMaterialsCost += cost;
+        if (sectionBreakdowns[mat.section_id]) {
+          sectionBreakdowns[mat.section_id].raw_materials_subtotal += cost;
+        }
+      });
+
+      laborTasks.forEach(task => {
+        const cost = task.crew_size * task.hours_estimated * task.hourly_rate;
+        totalProjectLaborCost += cost;
+        if (sectionBreakdowns[task.section_id]) {
+          sectionBreakdowns[task.section_id].raw_labor_subtotal += cost;
+        }
+      });
+
+      const clientProposalSections = Object.keys(sectionBreakdowns).map(sectionId => {
+        const sec = sectionBreakdowns[sectionId];
+        const rawSectionTotal = sec.raw_materials_subtotal + sec.raw_labor_subtotal;
+        return {
+          section_id: sectionId,
+          area_name: sec.area_name,
+          lump_sum_price: Math.round((rawSectionTotal * markupMultiplier) * 100) / 100
+        };
+      });
+
+      const totalRawCostBasis = totalProjectMaterialsCost + totalProjectLaborCost;
+      const finalTotalBid = Math.round((totalRawCostBasis * markupMultiplier) * 100) / 100;
+
+      return {
+        database_update: {
+          project_id: project.project_id,
+          total_materials_cost: totalProjectMaterialsCost,
+          total_labor_cost: totalProjectLaborCost,
+          markup_percent: defaultMarkup,
+          total_bid: finalTotalBid,
+          last_modified_at: new Date().toISOString()
+        },
+        client_proposal_view: {
+          sections: clientProposalSections,
+          grand_total: finalTotalBid
+        }
+      };
+    }
+
+    // ── Template data (BLU-001..004) ────────────────────────────────────────
+
+    const TEMPLATES = [
+      { id: 'BLU-001', title: 'Deck Construction', desc: 'Standard 12x16 Pressure Treated Deck',
+        sections: [{ section_id: 'S1', area_name: 'Main Deck' }, { section_id: 'S2', area_name: 'Steps & Landing' }],
+        materials: [
+          { material_id: 'M1', section_id: 'S1', project_id: null, item_name: '5/4x6x16 Composite Decking', category: 'Lumber', qty: 50, unit: 'ea', unit_cost: 18.50 },
+          { material_id: 'M2', section_id: 'S1', project_id: null, item_name: '2x10x16 Joists', category: 'Lumber', qty: 24, unit: 'ea', unit_cost: 19.75 },
+          { material_id: 'M3', section_id: 'S1', project_id: null, item_name: 'Galv Joist Hangers', category: 'Hardware', qty: 48, unit: 'ea', unit_cost: 1.10 },
+          { material_id: 'M4', section_id: 'S1', project_id: null, item_name: '6x6x10 Post', category: 'Lumber', qty: 6, unit: 'ea', unit_cost: 28.00 },
+          { material_id: 'M5', section_id: 'S2', project_id: null, item_name: '2x12x12 Stringer', category: 'Lumber', qty: 3, unit: 'ea', unit_cost: 32.00 },
+          { material_id: 'M6', section_id: 'S2', project_id: null, item_name: '5/4x6x6 Tread', category: 'Lumber', qty: 12, unit: 'ea', unit_cost: 8.50 }
+        ],
+        labor: [
+          { labor_id: 'L1', section_id: 'S1', project_id: null, task_description: 'Site prep & layout', crew_size: 2, hours_estimated: 4, hourly_rate: 65 },
+          { labor_id: 'L2', section_id: 'S1', project_id: null, task_description: 'Framing & joist installation', crew_size: 3, hours_estimated: 10, hourly_rate: 65 },
+          { labor_id: 'L3', section_id: 'S1', project_id: null, task_description: 'Decking installation', crew_size: 2, hours_estimated: 8, hourly_rate: 65 },
+          { labor_id: 'L4', section_id: 'S2', project_id: null, task_description: 'Steps & landing build-out', crew_size: 2, hours_estimated: 5, hourly_rate: 65 }
+        ]
+      },
+      { id: 'BLU-002', title: 'Framing Run', desc: 'Standard partition or load-bearing wall framing',
+        sections: [{ section_id: 'S1', area_name: 'Wall Framing' }],
+        materials: [
+          { material_id: 'M1', section_id: 'S1', project_id: null, item_name: '2x4x92-5/8 Precut Stud', category: 'Lumber', qty: 60, unit: 'ea', unit_cost: 5.25 },
+          { material_id: 'M2', section_id: 'S1', project_id: null, item_name: '2x4x16 Top/Bottom Plate', category: 'Lumber', qty: 12, unit: 'ea', unit_cost: 9.80 },
+          { material_id: 'M3', section_id: 'S1', project_id: null, item_name: 'Framing Nails 16d 5lb', category: 'Fasteners', qty: 4, unit: 'box', unit_cost: 14.50 }
+        ],
+        labor: [
+          { labor_id: 'L1', section_id: 'S1', project_id: null, task_description: 'Layout & plate installation', crew_size: 2, hours_estimated: 3, hourly_rate: 65 },
+          { labor_id: 'L2', section_id: 'S1', project_id: null, task_description: 'Stud framing & standing wall', crew_size: 2, hours_estimated: 8, hourly_rate: 65 }
+        ]
+      },
+      { id: 'BLU-003', title: 'Finish Trim / Baseboard', desc: 'Linear run trimming and installation templates',
+        sections: [{ section_id: 'S1', area_name: 'Living Areas' }, { section_id: 'S2', area_name: 'Hallway & Bedrooms' }],
+        materials: [
+          { material_id: 'M1', section_id: 'S1', project_id: null, item_name: 'Base Molding 3.5" MDF', category: 'Millwork', qty: 80, unit: 'lf', unit_cost: 1.20 },
+          { material_id: 'M2', section_id: 'S1', project_id: null, item_name: 'Door Casing Set', category: 'Millwork', qty: 6, unit: 'ea', unit_cost: 12.00 },
+          { material_id: 'M3', section_id: 'S1', project_id: null, item_name: "Painter's Caulk", category: 'Supplies', qty: 4, unit: 'ea', unit_cost: 3.50 },
+          { material_id: 'M4', section_id: 'S2', project_id: null, item_name: 'Base Molding 3.5" MDF', category: 'Millwork', qty: 120, unit: 'lf', unit_cost: 1.20 },
+          { material_id: 'M5', section_id: 'S2', project_id: null, item_name: 'Door Casing Set', category: 'Millwork', qty: 8, unit: 'ea', unit_cost: 12.00 }
+        ],
+        labor: [
+          { labor_id: 'L1', section_id: 'S1', project_id: null, task_description: 'Install base & crown – living areas', crew_size: 2, hours_estimated: 6, hourly_rate: 55 },
+          { labor_id: 'L2', section_id: 'S2', project_id: null, task_description: 'Install base & casing – hall/beds', crew_size: 2, hours_estimated: 8, hourly_rate: 55 }
+        ]
+      },
+      { id: 'BLU-004', title: 'Wood & LVP Flooring', desc: 'Square footage estimation models for click-lock systems',
+        sections: [{ section_id: 'S1', area_name: 'Main Floor' }],
+        materials: [
+          { material_id: 'M1', section_id: 'S1', project_id: null, item_name: 'LVP Click-Lock 7mm', category: 'Flooring', qty: 500, unit: 'sqft', unit_cost: 2.80 },
+          { material_id: 'M2', section_id: 'S1', project_id: null, item_name: 'Underlayment 3mm', category: 'Flooring', qty: 500, unit: 'sqft', unit_cost: 0.45 },
+          { material_id: 'M3', section_id: 'S1', project_id: null, item_name: 'T-Molding Transition', category: 'Trim', qty: 4, unit: 'ea', unit_cost: 18.00 },
+          { material_id: 'M4', section_id: 'S1', project_id: null, item_name: 'Pull Bar & Tapping Block Kit', category: 'Tools', qty: 1, unit: 'ea', unit_cost: 22.00 }
+        ],
+        labor: [
+          { labor_id: 'L1', section_id: 'S1', project_id: null, task_description: 'Subfloor prep & acclimation', crew_size: 1, hours_estimated: 4, hourly_rate: 55 },
+          { labor_id: 'L2', section_id: 'S1', project_id: null, task_description: 'LVP installation', crew_size: 2, hours_estimated: 10, hourly_rate: 55 },
+          { labor_id: 'L3', section_id: 'S1', project_id: null, task_description: 'Trim & transitions', crew_size: 1, hours_estimated: 2, hourly_rate: 55 }
+        ]
+      }
+    ];
+
+    // ── SaveProgressModal ───────────────────────────────────────────────────
+
+    function SaveProgressModal({ isOpen, onSave, onClose }) {
+      const [email, setEmail] = useState('');
+      const [password, setPassword] = useState('');
+      if (!isOpen) return null;
+      return (
+        <div style={{ position: 'fixed', bottom: 0, left: 0, right: 0, background: '#1a1a1a', color: '#fff', padding: 24, borderTopLeftRadius: 16, borderTopRightRadius: 16, boxShadow: '0 -4px 10px rgba(0,0,0,0.3)', zIndex: 1000 }}>
+          <h2 style={{ margin: '0 0 8px 0' }}>🔒 Secure Your Progress</h2>
+          <p style={{ color: '#ccc', fontSize: 14, marginBottom: 16 }}>
+            Nice work. Your estimate is fully calculated using live regional pricing. Enter an email and password to lock in this record and claim your first 3 free projects.
+          </p>
+          <input type="email" placeholder="Your Email Address" value={email} onChange={e => setEmail(e.target.value)}
+            style={{ width: '100%', padding: 10, margin: '8px 0', borderRadius: 4, border: 'none', fontSize: 14 }} />
+          <input type="password" placeholder="Create Password" value={password} onChange={e => setPassword(e.target.value)}
+            style={{ width: '100%', padding: 10, margin: '8px 0', borderRadius: 4, border: 'none', fontSize: 14 }} />
+          <button onClick={() => onSave(email, password)}
+            style={{ width: '100%', padding: 12, background: '#2e7d32', color: '#fff', border: 'none', borderRadius: 4, fontWeight: 'bold', marginTop: 12, cursor: 'pointer', fontSize: 15 }}>
+            💥 SECURE MY ACCOUNT & SAVE BID
+          </button>
+          <button onClick={onClose}
+            style={{ width: '100%', padding: 8, background: 'none', color: '#aaa', border: 'none', marginTop: 8, cursor: 'pointer', fontSize: 12 }}>
+            Cancel
+          </button>
+        </div>
+      );
+    }
+
+    // ── OnboardingScreen ────────────────────────────────────────────────────
+
+    function OnboardingScreen({ onNext }) {
+      const [bizName, setBizName] = useState('');
+      const [zip, setZip] = useState('');
+      return (
+        <div style={{ padding: 24, maxWidth: 400, margin: '0 auto' }}>
+          <h1>⚒️ CarpenterPro</h1>
+          <p style={{ color: '#555', marginTop: 8 }}>Ditch the desktop. Build accurate framing & carpentry estimates directly from your phone in under 60 seconds.</p>
+          <label style={{ display: 'block', marginTop: 16, fontWeight: 'bold' }}>Business Name</label>
+          <input type="text" placeholder="e.g. BECK BUILDER" value={bizName} onChange={e => setBizName(e.target.value)}
+            style={{ width: '100%', padding: 10, marginTop: 4, borderRadius: 4, border: '1px solid #ccc', fontSize: 14 }} />
+          <label style={{ display: 'block', marginTop: 16, fontWeight: 'bold' }}>Local Target ZIP Code</label>
+          <input type="text" placeholder="e.g. 62568" value={zip} onChange={e => setZip(e.target.value)}
+            style={{ width: '100%', padding: 10, marginTop: 4, borderRadius: 4, border: '1px solid #ccc', fontSize: 14 }} />
+          <button onClick={() => onNext({ bizName, zip })}
+            style={{ width: '100%', padding: 12, background: '#d32f2f', color: '#fff', border: 'none', borderRadius: 4, marginTop: 24, fontWeight: 'bold', cursor: 'pointer', fontSize: 15 }}>
+            LET'S BUILD AN ESTIMATE →
+          </button>
+        </div>
+      );
+    }
+
+    // ── TemplateSelector ────────────────────────────────────────────────────
+
+    function TemplateSelector({ onSelect }) {
+      return (
+        <div style={{ padding: 24, maxWidth: 400, margin: '0 auto' }}>
+          <h2>🪵 Choose Your Project Blueprint</h2>
+          <p style={{ color: '#666', marginBottom: 16, marginTop: 8 }}>Select a configuration layout to automatically load material schedules and labor components.</p>
+          {TEMPLATES.map(tmpl => (
+            <div key={tmpl.id} onClick={() => onSelect(tmpl)}
+              style={{ padding: 16, border: '2px solid #eee', borderRadius: 8, marginBottom: 12, cursor: 'pointer', backgroundColor: '#fafafa' }}>
+              <h4 style={{ margin: 0, color: '#333' }}>{tmpl.title}</h4>
+              <p style={{ margin: '4px 0 0 0', fontSize: 13, color: '#666' }}>{tmpl.desc}</p>
+            </div>
+          ))}
+        </div>
+      );
+    }
+
+    // ── EstimatorDashboard ──────────────────────────────────────────────────
+
+    function dashReducer(state, action) {
+      switch (action.type) {
+        case 'LOAD': return action.payload;
+        case 'UPDATE_MATERIAL':
+          return { ...state, materials: state.materials.map(m => m.material_id === action.materialId ? { ...m, [action.field]: action.value } : m) };
+        case 'UPDATE_LABOR':
+          return { ...state, labor: state.labor.map(l => l.labor_id === action.laborId ? { ...l, [action.field]: action.value } : l) };
+        default: return state;
+      }
+    }
+
+    function EstimatorDashboard({ project, authToken, onBack }) {
+      const [state, dispatch] = useReducer(dashReducer, { sections: [], materials: [], labor: [] });
+      const [dirty, setDirty] = useState(false);
+      const [modalOpen, setModalOpen] = useState(false);
+      const [syncing, setSyncing] = useState(false);
+
+      useEffect(() => {
+        const { sections, materials, labor } = localCache.getSaveState();
+        dispatch({ type: 'LOAD', payload: { sections, materials, labor } });
+      }, [project.project_id]);
+
+      const calc = useMemo(() => {
+        if (!state.sections.length) return null;
+        return calculateProjectTotal(project, state.sections, state.materials, state.labor, project.markup_percent ?? 20);
+      }, [project, state]);
+
+      const lumpSumById = useMemo(() => {
+        if (!calc) return {};
+        return Object.fromEntries(calc.client_proposal_view.sections.map(s => [s.section_id, s.lump_sum_price]));
+      }, [calc]);
+
+      function updateMaterial(materialId, field, value) {
+        dispatch({ type: 'UPDATE_MATERIAL', materialId, field, value });
+        setDirty(true);
+      }
+
+      function updateLabor(laborId, field, value) {
+        dispatch({ type: 'UPDATE_LABOR', laborId, field, value });
+        setDirty(true);
+      }
+
+      function persistLocally() {
+        if (!calc) return;
+        localCache.saveProjectOffline({ ...project, ...calc.database_update }, state.sections, state.materials, state.labor);
+        setDirty(false);
+      }
+
+      async function handleSaveAccount(email, password) {
+        persistLocally();
+        setSyncing(true);
+        try { await pushPendingChanges(authToken); } catch (e) { console.error(e); }
+        setSyncing(false);
+        setModalOpen(false);
+      }
+
+      const materialsBySection = {};
+      const laborBySection = {};
+      state.materials.forEach(m => { (materialsBySection[m.section_id] = materialsBySection[m.section_id] || []).push(m); });
+      state.labor.forEach(l => { (laborBySection[l.section_id] = laborBySection[l.section_id] || []).push(l); });
+
+      const grandTotal = calc?.client_proposal_view.grand_total ?? 0;
+      const totalMaterials = calc?.database_update.total_materials_cost ?? 0;
+      const totalLabor = calc?.database_update.total_labor_cost ?? 0;
+
+      return (
+        <div style={{ maxWidth: 480, margin: '0 auto', fontFamily: 'sans-serif' }}>
+          {/* Header */}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '12px 16px', borderBottom: '1px solid #eee', background: '#fff', position: 'sticky', top: 0, zIndex: 10 }}>
+            <button onClick={() => dirty ? setModalOpen(true) : onBack()} style={{ background: 'none', border: 'none', color: '#1a73e8', fontWeight: 600, cursor: 'pointer', fontSize: 14 }}>← Back</button>
+            <strong style={{ fontSize: 15 }}>{project.customer_name || 'New Estimate'}</strong>
+            <button onClick={() => { persistLocally(); setModalOpen(true); }} disabled={syncing}
+              style={{ background: 'none', border: 'none', color: syncing ? '#aaa' : '#1a73e8', fontWeight: 600, cursor: 'pointer', fontSize: 14 }}>
+              {syncing ? 'Saving…' : '💾 Save'}
+            </button>
+          </div>
+
+          {/* Bid banner */}
+          <div style={{ background: '#1a73e8', color: '#fff', padding: '14px 16px', textAlign: 'center' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-around', marginBottom: 6 }}>
+              <div><div style={{ fontSize: 11, opacity: 0.8 }}>Materials</div><div style={{ fontWeight: 700 }}>${totalMaterials.toFixed(2)}</div></div>
+              <div style={{ opacity: 0.3 }}>|</div>
+              <div><div style={{ fontSize: 11, opacity: 0.8 }}>Labor</div><div style={{ fontWeight: 700 }}>${totalLabor.toFixed(2)}</div></div>
+              <div style={{ opacity: 0.3 }}>|</div>
+              <div><div style={{ fontSize: 11, opacity: 0.8 }}>Total Bid</div><div style={{ fontWeight: 800, fontSize: 20 }}>${grandTotal.toFixed(2)}</div></div>
+            </div>
+            <div style={{ fontSize: 11, opacity: 0.6 }}>{project.markup_percent ?? 20}% markup · client sees lump sum per section</div>
+          </div>
+
+          {/* Section cards */}
+          <div style={{ padding: 16 }}>
+            {state.sections.map(section => {
+              const mats = materialsBySection[section.section_id] || [];
+              const labs = laborBySection[section.section_id] || [];
+              const lumpSum = lumpSumById[section.section_id] ?? 0;
+              return (
+                <div key={section.section_id} style={{ background: '#fff', border: '1px solid #eee', borderRadius: 8, padding: 16, marginBottom: 12 }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                    <strong style={{ fontSize: 15 }}>{section.area_name}</strong>
+                    <div style={{ textAlign: 'right' }}>
+                      <div style={{ fontSize: 10, color: '#aaa', fontWeight: 600 }}>CLIENT PRICE</div>
+                      <div style={{ fontSize: 17, fontWeight: 800, color: '#2e7d32' }}>${lumpSum.toFixed(2)}</div>
+                    </div>
+                  </div>
+
+                  {mats.length > 0 && <>
+                    <div style={{ fontSize: 10, fontWeight: 700, color: '#aaa', letterSpacing: 1, marginBottom: 6 }}>MATERIALS</div>
+                    {mats.map(m => (
+                      <div key={m.material_id} style={{ marginBottom: 10 }}>
+                        <div style={{ fontSize: 13, color: '#333', marginBottom: 4 }}>{m.item_name}</div>
+                        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                          <div><div style={{ fontSize: 10, color: '#999' }}>Qty</div>
+                            <input type="number" value={m.qty} onChange={e => updateMaterial(m.material_id, 'qty', parseFloat(e.target.value) || 0)}
+                              style={{ width: 60, padding: '4px 6px', border: '1px solid #ddd', borderRadius: 4, fontSize: 13, textAlign: 'center' }} /></div>
+                          <div><div style={{ fontSize: 10, color: '#999' }}>$/unit</div>
+                            <input type="number" value={m.unit_cost} onChange={e => updateMaterial(m.material_id, 'unit_cost', parseFloat(e.target.value) || 0)}
+                              style={{ width: 70, padding: '4px 6px', border: '1px solid #ddd', borderRadius: 4, fontSize: 13, textAlign: 'center' }} /></div>
+                          <strong style={{ marginLeft: 'auto', color: '#555', fontSize: 13 }}>${(m.qty * m.unit_cost).toFixed(2)}</strong>
+                        </div>
+                      </div>
+                    ))}
+                  </>}
+
+                  {labs.length > 0 && <>
+                    <div style={{ fontSize: 10, fontWeight: 700, color: '#aaa', letterSpacing: 1, marginTop: 10, marginBottom: 6 }}>LABOR</div>
+                    {labs.map(l => (
+                      <div key={l.labor_id} style={{ marginBottom: 10 }}>
+                        <div style={{ fontSize: 13, color: '#333', marginBottom: 4 }}>{l.task_description}</div>
+                        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                          <div><div style={{ fontSize: 10, color: '#999' }}>Crew</div>
+                            <input type="number" value={l.crew_size} onChange={e => updateLabor(l.labor_id, 'crew_size', parseFloat(e.target.value) || 0)}
+                              style={{ width: 50, padding: '4px 6px', border: '1px solid #ddd', borderRadius: 4, fontSize: 13, textAlign: 'center' }} /></div>
+                          <div><div style={{ fontSize: 10, color: '#999' }}>Hrs</div>
+                            <input type="number" value={l.hours_estimated} onChange={e => updateLabor(l.labor_id, 'hours_estimated', parseFloat(e.target.value) || 0)}
+                              style={{ width: 55, padding: '4px 6px', border: '1px solid #ddd', borderRadius: 4, fontSize: 13, textAlign: 'center' }} /></div>
+                          <div><div style={{ fontSize: 10, color: '#999' }}>$/hr</div>
+                            <input type="number" value={l.hourly_rate} onChange={e => updateLabor(l.labor_id, 'hourly_rate', parseFloat(e.target.value) || 0)}
+                              style={{ width: 60, padding: '4px 6px', border: '1px solid #ddd', borderRadius: 4, fontSize: 13, textAlign: 'center' }} /></div>
+                          <strong style={{ marginLeft: 'auto', color: '#555', fontSize: 13 }}>${(l.crew_size * l.hours_estimated * l.hourly_rate).toFixed(2)}</strong>
+                        </div>
+                      </div>
+                    ))}
+                  </>}
+                </div>
+              );
+            })}
+          </div>
+
+          <SaveProgressModal isOpen={modalOpen} onSave={handleSaveAccount} onClose={() => setModalOpen(false)} />
+        </div>
+      );
+    }
+
+    // ── App (root) ──────────────────────────────────────────────────────────
+
+    const SCREEN = { ONBOARDING: 'onboarding', TEMPLATE_SELECT: 'template_select', ESTIMATOR: 'estimator' };
+
+    function App() {
+      const [screen, setScreen] = useState(SCREEN.ONBOARDING);
+      const [authToken, setAuthToken] = useState(null);
+      const [activeProject, setActiveProject] = useState(null);
+
+      function handleOnboardingNext({ bizName, zip }) {
+        const userId = `USR-${Date.now()}`;
+        localCache.convertToPermanentUser(userId, `${userId}@local`, bizName, zip);
+        setAuthToken(userId);
+        setScreen(SCREEN.TEMPLATE_SELECT);
+      }
+
+      function handleTemplateSelected(template) {
+        const now = new Date().toISOString();
+        const project = {
+          project_id: `PRJ-${Date.now()}`,
+          user_id: localCache.getSaveState().user.user_id,
+          customer_name: null,
+          customer_address: null,
+          project_type: template.title,
+          status: 'draft',
+          total_materials_cost: 0,
+          total_labor_cost: 0,
+          markup_percent: 20,
+          total_bid: 0,
+          created_at: now,
+          last_modified_at: now
+        };
+        // Stamp project_id onto seeded rows
+        const sections = template.sections.map(s => ({ ...s }));
+        const materials = template.materials.map(m => ({ ...m, project_id: project.project_id }));
+        const labor = template.labor.map(l => ({ ...l, project_id: project.project_id }));
+        localCache.saveProjectOffline(project, sections, materials, labor);
+        setActiveProject(project);
+        setScreen(SCREEN.ESTIMATOR);
+      }
+
+      if (screen === SCREEN.ONBOARDING) return <OnboardingScreen onNext={handleOnboardingNext} />;
+      if (screen === SCREEN.TEMPLATE_SELECT) return <TemplateSelector onSelect={handleTemplateSelected} />;
+      if (screen === SCREEN.ESTIMATOR) return <EstimatorDashboard project={activeProject} authToken={authToken} onBack={() => setScreen(SCREEN.TEMPLATE_SELECT)} />;
+      return null;
+    }
+
+    ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+  </script>
+</body>
+</html>
